@@ -13,6 +13,9 @@ exports.generateAppKey = async (req, res) => {
         const privateKey = wallet.privateKey;
         const address = wallet.address;
 
+        console.log('App Key:', appKey);  // Debugging
+        console.log('EVM Address:', address);  // Debugging
+
         // Insert into MySQL DB
         await db.query('INSERT INTO users (app_key, private_key, address) VALUES (?, ?, ?)', [appKey, privateKey, address]);
 
@@ -22,6 +25,8 @@ exports.generateAppKey = async (req, res) => {
             evm_address: address,
         });
     } catch (error) {
+        console.error('Error generating app key:', error);  // Print full error
         res.status(500).json({ error: 'Failed to generate app key' });
     }
 };
+
