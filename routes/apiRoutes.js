@@ -14,6 +14,7 @@ router.post('/v1/generate-app-key', authController.generateAppKey);
 router.get('/v1/models', authenticate, modelController.fetchModels);
 
 // API to launch inference
+router.post('/v1/inferences/launch', authenticate, inferenceController.launchInference);
 router.post('/v1/inferences', authenticate, inferenceController.launchInference);
 
 module.exports = router;

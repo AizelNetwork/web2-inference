@@ -1,7 +1,7 @@
 // controllers/authController.js
 const { ethers } = require('ethers');
 const crypto = require('crypto');
-const db = require('../config/config');
+const db = require('../config/db'); // Assuming db.js handles your MySQL connection
 
 exports.generateAppKey = async (req, res) => {
     try {
@@ -10,23 +10,21 @@ exports.generateAppKey = async (req, res) => {
 
         // Generate EVM key pair
         const wallet = ethers.Wallet.createRandom();
-        const privateKey = wallet.privateKey;
-        const address = wallet.address;
-
-        console.log('App Key:', appKey);  // Debugging
-        console.log('EVM Address:', address);  // Debugging
+        const privateKey = wallet.privateKey; // 64-character private key
+        const publicKey = wallet.publicKey;   // Corresponding public key
+        const address = wallet.address;       // EVM address
 
         // Insert into MySQL DB
-        await db.query('INSERT INTO users (app_key, private_key, address) VALUES (?, ?, ?)', [appKey, privateKey, address]);
+        await db.query('INSERT INTO users (app_key, private_key, public_key, address) VALUES (?, ?, ?, ?)', [appKey, privateKey, publicKey, address]);
 
-        // Return the app key to the user
+        // Return the app key and public details to the user
         res.status(200).json({
             app_key: appKey,
             evm_address: address,
+            public_key: publicKey,
         });
     } catch (error) {
-        console.error('Error generating app key:', error);  // Print full error
+        console.error('Error generating app key:', error);
         res.status(500).json({ error: 'Failed to generate app key' });
     }
 };
-
