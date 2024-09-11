@@ -1,4 +1,3 @@
-// routes/apiRoutes.js
 const express = require('express');
 const authController = require('../controllers/authController');
 const modelController = require('../controllers/modelController');
@@ -15,6 +14,11 @@ router.get('/v1/models', authenticate, modelController.fetchModels);
 
 // API to launch inference
 router.post('/v1/inferences/launch', authenticate, inferenceController.launchInference);
-router.post('/v1/inferences', authenticate, inferenceController.launchInference);
+
+// Route to get requestId from transaction hash
+router.post('/v1/inferences/requestId', inferenceController.getRequestIdFromTxHash);
+
+// **NEW** API to fetch inference output based on requestId
+router.post('/v1/inferences/output', authenticate, inferenceController.fetchInferenceOutput);
 
 module.exports = router;
