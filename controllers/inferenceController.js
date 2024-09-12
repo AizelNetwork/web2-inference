@@ -10,7 +10,11 @@ const elgamal = new Elgamal();
 
 exports.launchInferenceAndGetRequestId = async (req, res) => {
     try {
-        const { model_id, input_data } = req.body;
+        const { model_id, user_input, system_prompt, temperature, max_tokens } = req.body;
+
+        // Combine system_prompt and user_input into input_data
+        const input_data = `### System:\n${system_prompt}\n### Human:\n${user_input}`;
+    
 
         // Fetch user's private key, public key, and address from the database using appKey
         const appKey = req.headers['authorization']?.split(' ')[1];
@@ -87,7 +91,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         if (!receipt) {
             return res.status(404).json({ error: 'Transaction receipt not found' });
         }
-
 
         // Decoding the event logs to get the requestId
         const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContract.target.toLowerCase());
@@ -210,6 +213,7 @@ async function getInferenceOutput(requestId) {
 // Function to decrypt the inference result
 async function decryptInferenceResult(encryptedOutput, privateKey) {
     try {
+
         // Ensure the encryptedOutput is a valid hex string and remove '0x' if present
         if (encryptedOutput.startsWith('0x')) {
             encryptedOutput = encryptedOutput.slice(2);
