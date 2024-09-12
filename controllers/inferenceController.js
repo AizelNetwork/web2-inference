@@ -8,12 +8,9 @@ const Elgamal = require('../utils/elgamal');
 // Initialize Elgamal encryption
 const elgamal = new Elgamal();
 
-exports.launchInference = async (req, res) => {
+exports.launchInferenceAndGetRequestId = async (req, res) => {
     try {
         const { model_id, input_data } = req.body;
-
-        console.log('Received model_id:', model_id);
-        console.log('Received input_data:', input_data);
 
         // Fetch user's private key, public key, and address from the database using appKey
         const appKey = req.headers['authorization']?.split(' ')[1];
@@ -31,16 +28,11 @@ exports.launchInference = async (req, res) => {
             userPublicKey = userPublicKey.slice(2);
         }
 
-        console.log('User Private Key:', userPrivateKey);
-        console.log('User Public Key (after removing 0x if present):', userPublicKey);
-        console.log('User Address:', userAddress);
-
-        // Initialize the user's wallet using the user's private key (from config)
+        // Initialize the user's wallet
         const userWallet = new ethers.Wallet(userPrivateKey, ethers.getDefaultProvider(config.RPC_URL));
-        // Initialize contracts using user's wallet
+        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, userWallet);
         const nodeContract = new ethers.Contract(config.CONTRACT_ADDRESSES.NODE_REGISTRY, abis.NodeRegistry, userWallet);
         const modelContract = new ethers.Contract(config.CONTRACT_ADDRESSES.MODEL, abis.Model, userWallet);
-        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, userWallet);
 
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
@@ -53,8 +45,6 @@ exports.launchInference = async (req, res) => {
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-
-        console.log('Selected node_id:', nodeId);
 
         // Encrypt the input data with the node's and user's public key
         const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
@@ -78,7 +68,7 @@ exports.launchInference = async (req, res) => {
 
         const inputHash = apiResponse.data;
 
-        // Blockchain transaction to register inference using the deployer's wallet
+        // Blockchain transaction to register inference
         const tx = await inferenceContract.requestInference(
             Number(nodeId),
             model_id,
@@ -89,18 +79,29 @@ exports.launchInference = async (req, res) => {
             { from: userAddress, value: ethers.parseEther('0.0000001') }
         );
 
-        console.log(`Transaction hash: ${tx.hash}`);
         await tx.wait();
 
-        res.status(200).json({ message: 'Inference launched successfully', txHash: tx.hash });
-    } catch (error) {
-        if (error.response) {
-            console.error('API Response Error:', error.response.data);
-            return res.status(500).json({ error: 'Failed to launch inference', details: error.response.data });
-        } else {
-            console.error('Error launching inference:', error.message || error);
-            return res.status(500).json({ error: 'Failed to launch inference', details: error.message });
+        // Fetch the transaction receipt to get the requestId
+        const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(tx.hash);
+
+        if (!receipt) {
+            return res.status(404).json({ error: 'Transaction receipt not found' });
         }
+
+
+        // Decoding the event logs to get the requestId
+        const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContract.target.toLowerCase());
+        if (!log) {
+            return res.status(404).json({ error: 'No logs found related to the Inference contract' });
+        }
+
+        const requestId = BigInt(log.topics[1]).toString();
+
+        // Return the requestId to the user
+        res.status(200).json({ requestId: requestId });
+    } catch (error) {
+        console.error('Error launching inference and fetching requestId:', error.message || error);
+        res.status(500).json({ error: 'Failed to launch inference', details: error.message });
     }
 };
 
@@ -112,16 +113,12 @@ exports.getRequestIdFromTxHash = async (req, res) => {
             return res.status(400).json({ error: 'Transaction hash is required' });
         }
 
-        console.log(`Fetching transaction receipt for txHash: ${txHash}`);
-
         // Fetch the transaction receipt using the transaction hash
         const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(txHash);
 
         if (!receipt) {
             return res.status(404).json({ error: 'Transaction receipt not found' });
         }
-
-        console.log('Transaction receipt logs:', receipt.logs);
 
         // Initialize the InferenceContract instance
         const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, ethers.getDefaultProvider(config.RPC_URL));
@@ -133,12 +130,8 @@ exports.getRequestIdFromTxHash = async (req, res) => {
             return res.status(404).json({ error: 'No logs found related to the Inference contract' });
         }
 
-        console.log('Log found:', log);
-
         // Decoding the event log to get the requestId
         const requestId = BigInt(log.topics[1]).toString();
-
-        console.log(`Decoded requestId: ${requestId}`);
 
         // Return the requestId
         res.status(200).json({ requestId: requestId });
@@ -175,7 +168,6 @@ exports.fetchInferenceOutput = async (req, res) => {
         // Check the status of the inference request
         if (inferenceResult.status !== 'Success') {
             // If not successful, return the current status
-            console.log(`Current Inference Status: ${inferenceResult.status}`);
             return res.status(200).json({ status: inferenceResult.status });
         }
 
@@ -185,7 +177,6 @@ exports.fetchInferenceOutput = async (req, res) => {
         }
 
         const decryptedOutput = await decryptInferenceResult(inferenceResult.output, userPrivateKey);
-        console.log("Decrypted Inference Output:", decryptedOutput);
 
         // Return the decrypted output
         res.status(200).json({ decryptedOutput: decryptedOutput });
@@ -199,10 +190,8 @@ exports.fetchInferenceOutput = async (req, res) => {
 async function getInferenceOutput(requestId) {
     try {
         const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
-        console.log("Fetching inference output from:", url);
         const response = await axios.get(url);
-        console.log("API Response:", response.data);
-
+        
         if (!response.data || !response.data.data || !response.data.data.records) {
             throw new Error("Invalid response structure from API.");
         }
@@ -221,10 +210,6 @@ async function getInferenceOutput(requestId) {
 // Function to decrypt the inference result
 async function decryptInferenceResult(encryptedOutput, privateKey) {
     try {
-        // Log the parameters to verify them
-        console.log('Encrypted Output:', encryptedOutput);
-        console.log('Private Key:', privateKey);
-
         // Ensure the encryptedOutput is a valid hex string and remove '0x' if present
         if (encryptedOutput.startsWith('0x')) {
             encryptedOutput = encryptedOutput.slice(2);
