@@ -221,12 +221,31 @@ async function getInferenceOutput(requestId) {
 // Function to decrypt the inference result
 async function decryptInferenceResult(encryptedOutput, privateKey) {
     try {
+        // Log the parameters to verify them
+        console.log('Encrypted Output:', encryptedOutput);
+        console.log('Private Key:', privateKey);
+
+        // Ensure the encryptedOutput is a valid hex string and remove '0x' if present
+        if (encryptedOutput.startsWith('0x')) {
+            encryptedOutput = encryptedOutput.slice(2);
+        }
+
+        // Ensure the private key is formatted correctly as a hex string and remove '0x' if present
+        if (privateKey.startsWith('0x')) {
+            privateKey = privateKey.slice(2);
+        }
+
+        // Perform the decryption
         const decryptedOutput = elgamal.decrypt(Buffer.from(encryptedOutput, 'hex'), Buffer.from(privateKey, 'hex'));
-        return Buffer.from(decryptedOutput, 'hex').toString();  // Convert the decrypted output back to a readable format
+
+        // Convert decrypted data from hex to a readable format
+        return Buffer.from(decryptedOutput, 'hex').toString();
     } catch (error) {
+        console.error('Decryption failed:', error.message);
         throw new Error(`Decryption failed: ${error.message}`);
     }
 }
+
 
 
 // Helper function to get a random node based on dataNodeId
