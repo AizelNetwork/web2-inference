@@ -103,6 +103,15 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         // Return the requestId to the user
         res.status(200).json({ requestId: requestId });
     } catch (error) {
+         // Check if the error is due to insufficient balance
+         if (error.message.includes('estimateGas') || error.message.includes('CALL_EXCEPTION')) {
+            console.error('Error:', error);
+            return res.status(400).json({
+                error: 'Failed to launch inference',
+                details: 'The transaction likely failed due to insufficient balance. Please check your wallet balance and try again.'
+            });
+        }
+        
         console.error('Error launching inference and fetching requestId:', error.message || error);
         res.status(500).json({ error: 'Failed to launch inference', details: error.message });
     }
