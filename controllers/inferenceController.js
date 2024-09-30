@@ -13,7 +13,14 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         const { model_id, user_input, system_prompt, temperature, max_tokens } = req.body;
 
         // Combine system_prompt and user_input into input_data
-        const input_data = `${system_prompt}\n\n\n${user_input}`;
+        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
+        if (model_id != 6) {
+            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
+            console.log("model id is not 6, using combined system prompt and user input");
+        } else {
+            console.log("model id is 6, using user_input directly");
+        }
+        
     
 
         // Fetch user's private key, public key, and address from the database using appKey
