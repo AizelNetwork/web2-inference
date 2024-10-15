@@ -4,9 +4,22 @@ const db = require('../config/db');
 const config = require('../config/config');
 const abis = require('../config/abis');
 const Elgamal = require('../utils/elgamal');
+// Import Mutex to handle concurrency
+const { Mutex } = require('async-mutex');
 
 // Initialize Elgamal encryption
 const elgamal = new Elgamal();
+
+// Create a map of mutexes for each user address
+const addressMutexMap = new Map();
+
+function getAddressMutex(address) {
+    if (!addressMutexMap.has(address)) {
+        addressMutexMap.set(address, new Mutex());
+    }
+    return addressMutexMap.get(address);
+}
+
 
 exports.launchInferenceAndGetRequestId = async (req, res) => {
     try {
@@ -14,9 +27,11 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         // Combine system_prompt and user_input into input_data
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id != 6) {
+        if (model_id != 6 && model_id !=9 ) {
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
             console.log("model id is not 6, using combined system prompt and user input");
+        } else if (model_id == 9) {
+            input_data = user_input;
         } else {
             console.log("model id is 6, using user_input directly");
         }
@@ -79,18 +94,32 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         const inputHash = apiResponse.data;
 
-        // Blockchain transaction to register inference
-        const tx = await inferenceContract.requestInference(
-            Number(nodeId),
-            model_id,
-            inputHash,
-            userPublicKey,
-            "0x0000000000000000000000000000000000000000",
-            ethers.parseEther('0.0000001'),
-            { from: userAddress, value: ethers.parseEther('0.0000001') }
-        );
+        // Declare tx variable outside the mutex block
+        let tx;
+        // Acquire the address-specific mutex to manage nonce
+        const addressMutex = getAddressMutex(userAddress);
+        await addressMutex.runExclusive(async () => {
+            // Fetch the current nonce for the user
+            let nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
 
-        await tx.wait();
+            // Blockchain transaction to register inference with manual nonce
+            tx = await inferenceContract.requestInference(
+                Number(nodeId),
+                model_id,
+                inputHash,
+                userPublicKey,
+                "0x0000000000000000000000000000000000000000",
+                ethers.parseEther('0.0000001'),
+                {
+                    from: userAddress,
+                    value: ethers.parseEther('0.0000001'),
+                    nonce: nonce // Manually setting the nonce
+                }
+            );
+
+            // Wait for the transaction to be mined
+            await tx.wait();
+        });
 
         // Fetch the transaction receipt to get the requestId
         const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(tx.hash);
