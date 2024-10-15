@@ -10,14 +10,14 @@ const { Mutex } = require('async-mutex');
 // Initialize Elgamal encryption
 const elgamal = new Elgamal();
 
-// Create a map of mutexes for each user address
-const addressMutexMap = new Map();
+// Create a map to track nonces and mutexes for each user
+const userStateMap = new Map();
 
-function getAddressMutex(address) {
-    if (!addressMutexMap.has(address)) {
-        addressMutexMap.set(address, new Mutex());
+function getUserState(address) {
+    if (!userStateMap.has(address)) {
+        userStateMap.set(address, { mutex: new Mutex(), nonce: null });
     }
-    return addressMutexMap.get(address);
+    return userStateMap.get(address);
 }
 
 
@@ -96,13 +96,15 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         // Declare tx variable outside the mutex block
         let tx;
-        // Acquire the address-specific mutex to manage nonce
-        const addressMutex = getAddressMutex(userAddress);
-        await addressMutex.runExclusive(async () => {
-            // Fetch the current nonce for the user
-            let nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
+        // Handle user-specific nonce and transaction
+        const userState = getUserState(userAddress);
+        await userState.mutex.runExclusive(async () => {
+            // If nonce is not cached, fetch it from the provider
+            if (userState.nonce === null) {
+                userState.nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
+            }
 
-            // Blockchain transaction to register inference with manual nonce
+            // Blockchain transaction to register inference with local nonce
             tx = await inferenceContract.requestInference(
                 Number(nodeId),
                 model_id,
@@ -113,9 +115,12 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
                 {
                     from: userAddress,
                     value: ethers.parseEther('0.0000001'),
-                    nonce: nonce // Manually setting the nonce
+                    nonce: userState.nonce // Use local nonce
                 }
             );
+
+            // Increment local nonce for the next transaction
+            userState.nonce++;
 
             // Wait for the transaction to be mined
             await tx.wait();
