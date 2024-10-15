@@ -10,8 +10,15 @@ const { Mutex } = require('async-mutex');
 // Initialize Elgamal encryption
 const elgamal = new Elgamal();
 
-// Create a mutex lock for managing nonce
-const nonceMutex = new Mutex();
+// Create a map of mutexes for each user address
+const addressMutexMap = new Map();
+
+function getAddressMutex(address) {
+    if (!addressMutexMap.has(address)) {
+        addressMutexMap.set(address, new Mutex());
+    }
+    return addressMutexMap.get(address);
+}
 
 
 exports.launchInferenceAndGetRequestId = async (req, res) => {
@@ -20,9 +27,11 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         // Combine system_prompt and user_input into input_data
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id != 6) {
+        if (model_id != 6 && model_id !=9 ) {
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
             console.log("model id is not 6, using combined system prompt and user input");
+        } else if (model_id == 9) {
+            input_data = user_input;
         } else {
             console.log("model id is 6, using user_input directly");
         }
@@ -87,8 +96,9 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         // Declare tx variable outside the mutex block
         let tx;
-        // Acquire the lock to manage nonce
-        await nonceMutex.runExclusive(async () => {
+        // Acquire the address-specific mutex to manage nonce
+        const addressMutex = getAddressMutex(userAddress);
+        await addressMutex.runExclusive(async () => {
             // Fetch the current nonce for the user
             let nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
 
