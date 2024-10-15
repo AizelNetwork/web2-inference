@@ -121,10 +121,11 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
             // Increment local nonce for the next transaction
             userState.nonce++;
-
-            // Wait for the transaction to be mined
-            await tx.wait();
+            
         });
+
+        // Wait for the transaction to be mined
+        await tx.wait();
 
         // Fetch the transaction receipt to get the requestId
         const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(tx.hash);
