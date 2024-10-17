@@ -12,8 +12,11 @@ router.post('/v1/generate-app-key', authController.generateAppKey);
 // API to fetch models
 router.get('/v1/models', authenticate, modelController.fetchModels);
 
-// API to launch inference
+// API to launch inference and get requestId
 router.post('/v1/inferences/launch', authenticate, inferenceController.launchInferenceAndGetRequestId);
+
+// API to launch inference and get txHash
+router.post('/v1/inferences/launchTx', authenticate, inferenceController.launchInferenceAndGetTx);
 
 // Route to get requestId from transaction hash
 router.post('/v1/inferences/requestId', inferenceController.getRequestIdFromTxHash);

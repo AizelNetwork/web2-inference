@@ -159,6 +159,126 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
     }
 };
 
+exports.launchInferenceAndGetTx = async (req, res) => {
+    try {
+        const { model_id, user_input, system_prompt, temperature, max_tokens } = req.body;
+
+        // Combine system_prompt and user_input into input_data
+        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
+        if (model_id != 6 && model_id !=9 ) {
+            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
+            console.log("model id is not 6, using combined system prompt and user input");
+        } else if (model_id == 9) {
+            input_data = user_input;
+        } else {
+            console.log("model id is 6, using user_input directly");
+        }
+        
+    
+
+        // Fetch user's private key, public key, and address from the database using appKey
+        const appKey = req.headers['authorization']?.split(' ')[1];
+        const [user] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
+        if (user.length === 0) {
+            return res.status(401).json({ error: 'Invalid app key' });
+        }
+
+        const userPrivateKey = user[0].private_key;
+        let userPublicKey = user[0].public_key;
+        const userAddress = user[0].address;
+
+        // Remove '0x' prefix if present in the user's public key
+        if (userPublicKey.startsWith('0x')) {
+            userPublicKey = userPublicKey.slice(2);
+        }
+
+        // Initialize the user's wallet
+        const userWallet = new ethers.Wallet(userPrivateKey, ethers.getDefaultProvider(config.RPC_URL));
+        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, userWallet);
+        const nodeContract = new ethers.Contract(config.CONTRACT_ADDRESSES.NODE_REGISTRY, abis.NodeRegistry, userWallet);
+        const modelContract = new ethers.Contract(config.CONTRACT_ADDRESSES.MODEL, abis.Model, userWallet);
+
+        // Fetch data nodes for the model
+        const dataNodes = await modelContract.getDataNodesForModel(model_id);
+        const nodesData = await nodeContract.getAllActiveNodes();
+
+        const node = getRandomObjectByDatanodeId(dataNodes, nodesData);
+        if (!node) {
+            throw new Error('No matching node found for the selected data nodes.');
+        }
+
+        const nodeId = node.nodeId;
+        const nodePublicKey = node.pubkey;
+
+        // Encrypt the input data with the node's and user's public key
+        const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
+        const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
+
+        // Send inference request to the API with encrypted data
+        const apiResponse = await axios.post(config.API_ENDPOINTS.INFERENCE_LAUNCH, {
+            requester: userAddress,
+            node_id: Number(nodeId),
+            model_id: Number(model_id),
+            input_encrypt_by_node: encryptedByNode,
+            input_encrypt_by_user: encryptedByUser,
+            pubkey: userPublicKey,
+            session: "cli-session"
+        });
+
+        if (apiResponse.status !== 200) {
+            console.error('API Response Error:', apiResponse.data);
+            throw new Error(`Inference launch failed: ${apiResponse.data.error}`);
+        }
+
+        const inputHash = apiResponse.data;
+
+        // Declare tx variable outside the mutex block
+        let tx;
+        // Handle user-specific nonce and transaction
+        const userState = getUserState(userAddress);
+        await userState.mutex.runExclusive(async () => {
+            // If nonce is not cached, fetch it from the provider
+            if (userState.nonce === null) {
+                userState.nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
+            }
+
+            // Blockchain transaction to register inference with local nonce
+            tx = await inferenceContract.requestInference(
+                Number(nodeId),
+                model_id,
+                inputHash,
+                userPublicKey,
+                "0x0000000000000000000000000000000000000000",
+                ethers.parseEther('0.0000001'),
+                {
+                    from: userAddress,
+                    value: ethers.parseEther('0.0000001'),
+                    nonce: userState.nonce // Use local nonce
+                }
+            );
+
+            // Increment local nonce for the next transaction
+            userState.nonce++;
+            
+        });
+
+        // Return the requestId to the user
+        res.status(200).json({ txHash: tx.hash });
+    } catch (error) {
+         // Check if the error is due to insufficient balance
+         if (error.message.includes('estimateGas') || error.message.includes('CALL_EXCEPTION')) {
+            console.error('Error:', error);
+            return res.status(400).json({
+                error: 'Failed to launch inference',
+                details: 'The transaction likely failed due to insufficient balance. Please check your wallet balance and try again.'
+            });
+        }
+        
+        console.error('Error launching inference and fetching requestId:', error.message || error);
+        res.status(500).json({ error: 'Failed to launch inference', details: error.message });
+    }
+};
+
 exports.getRequestIdFromTxHash = async (req, res) => {
     try {
         const { txHash } = req.body;
