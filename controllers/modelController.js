@@ -24,16 +24,12 @@ async function getNetworkConfig(network_name) {
         contracts[contract.smart_contract_name] = contract.smart_contract_address;
     });
 
-    // Get the API endpoints from the config file (if necessary)
-    const api_endpoints = config.API_ENDPOINTS;
-
     // Combine the network configuration
     const networkConfig = {
         network_name: network_name,
         evm_chain_id: evm_chain_id,
         rpc_url: rpc_url,
-        contracts: contracts,
-        api_endpoints: api_endpoints
+        contracts: contracts
     };
 
     return networkConfig;
@@ -61,7 +57,9 @@ exports.fetchModels = async (req, res) => {
         // Fetch network and contract configurations from the database using network_name
         const networkConfig = await getNetworkConfig(network_name);
         // Fetch the models from the external API
-        const response = await axios.get(networkConfig.api_endpoints.MODEL_LIST);
+        const response = await axios.get(config.API_ENDPOINTS.MODEL_LIST,{
+            network: networkConfig.network_name
+        });
 
         // Extract the models from the response
         const models = response.data.data.models;

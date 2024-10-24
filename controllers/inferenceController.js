@@ -42,16 +42,12 @@ async function getNetworkConfig(network_name) {
         contracts[contract.smart_contract_name] = contract.smart_contract_address;
     });
 
-    // Get the API endpoints from the config file (if necessary)
-    const api_endpoints = config.API_ENDPOINTS;
-
     // Combine the network configuration
     const networkConfig = {
         network_name: network_name,
         evm_chain_id: evm_chain_id,
         rpc_url: rpc_url,
-        contracts: contracts,
-        api_endpoints: api_endpoints
+        contracts: contracts
     };
 
     return networkConfig;
@@ -132,7 +128,7 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
 
         // Send inference request to the API with encrypted data
-        const apiResponse = await axios.post(networkConfig.api_endpoints.INFERENCE_LAUNCH, {
+        const apiResponse = await axios.post(config.API_ENDPOINTS.INFERENCE_LAUNCH, {
             requester: userAddress,
             node_id: Number(nodeId),
             model_id: Number(model_id),
@@ -152,7 +148,7 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         // Declare tx variable outside the mutex block
         let tx;
         // Handle user-specific nonce and transaction
-        const userState = getUserState(userAddress);
+        const userState = getUserState(userAddress,network_name);
         await userState.mutex.runExclusive(async () => {
             // If nonce is not cached, fetch it from the provider
             if (userState.nonce === null) {
@@ -268,8 +264,6 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
 
-        console.log(dataNodes);
-        console.log(nodesData);
         const node = getRandomObjectByDatanodeId(dataNodes, nodesData);
         if (!node) {
             throw new Error('No matching node found for the selected data nodes.');
@@ -277,13 +271,13 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-        console.log("nodeId : "+ nodeId);
+        
         // Encrypt the input data with the node's and user's public key
         const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
         const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
 
         // Send inference request to the API with encrypted data
-        const apiResponse = await axios.post(networkConfig.api_endpoints.INFERENCE_LAUNCH, {
+        const apiResponse = await axios.post(config.API_ENDPOINTS.INFERENCE_LAUNCH, {
             requester: userAddress,
             node_id: Number(nodeId),
             model_id: Number(model_id),
@@ -303,7 +297,7 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         // Declare tx variable outside the mutex block
         let tx;
         // Handle user-specific nonce and transaction
-        const userState = getUserState(userAddress);
+        const userState = getUserState(userAddress,network_name);
         await userState.mutex.runExclusive(async () => {
             // If nonce is not cached, fetch it from the provider
             if (userState.nonce === null) {
@@ -385,15 +379,11 @@ exports.getRequestIdFromTxHash = async (req, res) => {
 
 exports.fetchInferenceOutput = async (req, res) => {
     try {
-        const { requestId, network_name } = req.body;
+        const { requestId } = req.body;
         const appKey = req.headers['authorization']?.split(' ')[1];
 
         if (!requestId) {
             return res.status(400).json({ error: 'requestId is required' });
-        }
-
-        if (!network_name) {
-            return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch user's private key from the database using appKey
@@ -405,7 +395,7 @@ exports.fetchInferenceOutput = async (req, res) => {
         const userPrivateKey = user[0].private_key;
 
         // Fetch the inference output based on requestId
-        const inferenceResult = await getInferenceOutput(requestId,network_name);
+        const inferenceResult = await getInferenceOutput(requestId);
 
         if (!inferenceResult) {
             return res.status(404).json({ error: 'No valid inference result found' });
@@ -433,11 +423,10 @@ exports.fetchInferenceOutput = async (req, res) => {
 };
 
 // Function to fetch the inference output using requestId
-async function getInferenceOutput(requestId, network_name) {
+async function getInferenceOutput(requestId) {
     try {
         // Fetch network and contract configurations from the database using network_name
-        const networkConfig = await getNetworkConfig(network_name);
-        const url = `${networkConfig.api_endpoints.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
+        const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
         const response = await axios.get(url);
         
         if (!response.data || !response.data.data || !response.data.data.records) {
@@ -479,8 +468,6 @@ async function decryptInferenceResult(encryptedOutput, privateKey) {
         throw new Error(`Decryption failed: ${error.message}`);
     }
 }
-
-
 
 // Helper function to get a random node based on dataNodeId
 function getRandomObjectByDatanodeId(intArray, objectArray) {
