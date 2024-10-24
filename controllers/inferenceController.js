@@ -69,9 +69,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         // Fetch network and contract configurations from the database using network_name
         const networkConfig = await getNetworkConfig(network_name);
 
-        // Debugging log to verify contracts and provider setup
-        console.log('Network Configuration:', networkConfig);
-
         // Initialize provider with the fetched RPC URL
         const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
 
@@ -103,10 +100,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         const nodeContractAddress = networkConfig.contracts.INFERENCE_NODE;
         const modelContractAddress = networkConfig.contracts.MODEL;
 
-        console.log(inferenceContractAddress);
-        console.log(nodeContractAddress);
-        console.log(modelContractAddress);
-
         const inferenceContract = new ethers.Contract(inferenceContractAddress, abis.Inference, userWallet);
         const nodeContract = new ethers.Contract(nodeContractAddress, abis.NodeRegistry, userWallet);
         const modelContract = new ethers.Contract(modelContractAddress, abis.Model, userWallet);
@@ -126,8 +119,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
 
-        console.log(dataNodes);
-        console.log(nodesData);
         const node = getRandomObjectByDatanodeId(dataNodes, nodesData);
         if (!node) {
             throw new Error('No matching node found for the selected data nodes.');
@@ -258,10 +249,6 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         const nodeContractAddress = networkConfig.contracts.INFERENCE_NODE;
         const modelContractAddress = networkConfig.contracts.MODEL;
 
-        console.log(inferenceContractAddress);
-        console.log(nodeContractAddress);
-        console.log(modelContractAddress);
-
         const inferenceContract = new ethers.Contract(inferenceContractAddress, abis.Inference, userWallet);
         const nodeContract = new ethers.Contract(nodeContractAddress, abis.NodeRegistry, userWallet);
         const modelContract = new ethers.Contract(modelContractAddress, abis.Model, userWallet);
@@ -352,21 +339,31 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
 exports.getRequestIdFromTxHash = async (req, res) => {
     try {
-        const { txHash } = req.body;
+        const { txHash, network_name } = req.body;
 
         if (!txHash) {
             return res.status(400).json({ error: 'Transaction hash is required' });
         }
 
+        if (!network_name) {
+            return res.status(400).json({ error: 'Network name is required' });
+        }
+
+        // Fetch network and contract configurations from the database using network_name
+        const networkConfig = await getNetworkConfig(network_name);
+
+        // Initialize provider with the fetched RPC URL
+        const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
+
         // Fetch the transaction receipt using the transaction hash
-        const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(txHash);
+        const receipt = await provider.getTransactionReceipt(txHash);
 
         if (!receipt) {
             return res.status(404).json({ error: 'Transaction receipt not found' });
         }
 
         // Initialize the InferenceContract instance
-        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, ethers.getDefaultProvider(config.RPC_URL));
+        const inferenceContract = new ethers.Contract(networkConfig.contracts.INFERENCE, abis.Inference, provider);
 
         // Find the log that matches the InferenceContract address
         const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContract.target.toLowerCase());
@@ -388,11 +385,15 @@ exports.getRequestIdFromTxHash = async (req, res) => {
 
 exports.fetchInferenceOutput = async (req, res) => {
     try {
-        const { requestId } = req.body;
+        const { requestId, network_name } = req.body;
         const appKey = req.headers['authorization']?.split(' ')[1];
 
         if (!requestId) {
             return res.status(400).json({ error: 'requestId is required' });
+        }
+
+        if (!network_name) {
+            return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch user's private key from the database using appKey
@@ -404,7 +405,7 @@ exports.fetchInferenceOutput = async (req, res) => {
         const userPrivateKey = user[0].private_key;
 
         // Fetch the inference output based on requestId
-        const inferenceResult = await getInferenceOutput(requestId);
+        const inferenceResult = await getInferenceOutput(requestId,network_name);
 
         if (!inferenceResult) {
             return res.status(404).json({ error: 'No valid inference result found' });
@@ -432,9 +433,11 @@ exports.fetchInferenceOutput = async (req, res) => {
 };
 
 // Function to fetch the inference output using requestId
-async function getInferenceOutput(requestId) {
+async function getInferenceOutput(requestId, network_name) {
     try {
-        const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
+        // Fetch network and contract configurations from the database using network_name
+        const networkConfig = await getNetworkConfig(network_name);
+        const url = `${networkConfig.api_endpoints.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
         const response = await axios.get(url);
         
         if (!response.data || !response.data.data || !response.data.data.records) {
