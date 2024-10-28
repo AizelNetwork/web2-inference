@@ -112,7 +112,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
             console.log("model id is not 6 or 9, using combined system prompt and user input");
         }
-        console.log("model id : "+model_id);
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
@@ -253,15 +252,16 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
         // Define input_data
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id != 6 && model_id != 9) {
+        if (model_id == 9) {
+            input_data = user_input;
+        } else if (model_id == 4) {
+            console.log("model id is 6, using user_input directly");
+        }else if (model_id == 6 ){
+            console.log("model id is 6, using user_input directly");
+        } else {
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
             console.log("model id is not 6 or 9, using combined system prompt and user input");
-        } else if (model_id == 9) {
-            input_data = user_input;
-        } else {
-            console.log("model id is 6, using user_input directly");
         }
-        console.log("model id : "+model_id);
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
