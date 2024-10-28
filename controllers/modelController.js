@@ -57,9 +57,9 @@ exports.fetchModels = async (req, res) => {
         // Fetch network and contract configurations from the database using network_name
         const networkConfig = await getNetworkConfig(network_name);
         // Fetch the models from the external API
-        const response = await axios.get(config.API_ENDPOINTS.MODEL_LIST,{
-            network: networkConfig.network_name
-        });
+        const url = config.API_ENDPOINTS.MODEL_LIST+"?network="+networkConfig.network_name;
+        const response = await axios.get(url,{}
+        );
 
         // Extract the models from the response
         const models = response.data.data.models;
