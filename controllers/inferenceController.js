@@ -104,9 +104,9 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
         if (model_id == 9) {
             input_data = user_input;
-        } else if (model_id == 4) {
-            console.log("model id is 6, using user_input directly");
-        }else if (model_id == 6 ){
+        }  else if (model_id == 4 && network_name=="krest" || model_id == 2 && network_name == "peaq") {
+            console.log("using user_input directly");
+        } else if (model_id == 6 ){
             console.log("model id is 6, using user_input directly");
         } else {
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
@@ -254,9 +254,9 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
         if (model_id == 9) {
             input_data = user_input;
-        } else if (model_id == 4) {
-            console.log("model id is 6, using user_input directly");
-        }else if (model_id == 6 ){
+        } else if (model_id == 4 && network_name=="krest" || model_id == 2 && network_name == "peaq") {
+            console.log("using user_input directly");
+        } else if (model_id == 6 ){
             console.log("model id is 6, using user_input directly");
         } else {
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
@@ -381,11 +381,15 @@ exports.getRequestIdFromTxHash = async (req, res) => {
 
 exports.fetchInferenceOutput = async (req, res) => {
     try {
-        const { requestId } = req.body;
+        const { requestId, network_name } = req.body;
         const appKey = req.headers['authorization']?.split(' ')[1];
 
         if (!requestId) {
             return res.status(400).json({ error: 'requestId is required' });
+        }
+
+        if (!network_name) {
+            return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch user's private key from the database using appKey
@@ -395,9 +399,9 @@ exports.fetchInferenceOutput = async (req, res) => {
         }
 
         const userPrivateKey = user[0].private_key;
-
+        
         // Fetch the inference output based on requestId
-        const inferenceResult = await getInferenceOutput(requestId);
+        const inferenceResult = await getInferenceOutput(requestId,network_name);
 
         if (!inferenceResult) {
             return res.status(404).json({ error: 'No valid inference result found' });
@@ -425,10 +429,11 @@ exports.fetchInferenceOutput = async (req, res) => {
 };
 
 // Function to fetch the inference output using requestId
-async function getInferenceOutput(requestId) {
+async function getInferenceOutput(requestId,network_name) {
     try {
+        
         // Fetch network and contract configurations from the database using network_name
-        const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
+        const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?network=${network_name}&inference_id=${requestId}&order_asc=false&prev=false`;
         const response = await axios.get(url);
         
         if (!response.data || !response.data.data || !response.data.data.records) {
