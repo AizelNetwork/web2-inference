@@ -10,44 +10,78 @@ const { Mutex } = require('async-mutex');
 // Initialize Elgamal encryption
 const elgamal = new Elgamal();
 
-// Create a map to track nonces and mutexes for each user
+// Create a map to track nonces and mutexes for each user and network
 const userStateMap = new Map();
 
-function getUserState(address) {
-    if (!userStateMap.has(address)) {
-        userStateMap.set(address, { mutex: new Mutex(), nonce: null });
+function getUserState(address, network_id) {
+    const key = `${address}_${network_id}`; // Combine address and network_id as a unique key
+    if (!userStateMap.has(key)) {
+        userStateMap.set(key, { mutex: new Mutex(), nonce: null });
     }
-    return userStateMap.get(address);
+    return userStateMap.get(key);
+}
+
+async function getNetworkConfig(network_name) {
+    // Fetch the network configuration and smart contracts from the database
+    const [networkResult] = await db.query(`
+        SELECT n.evm_chain_id, n.rpc_url, c.smart_contract_name, c.smart_contract_address 
+        FROM networks n
+        JOIN contracts c ON n.id = c.network_id
+        WHERE n.network_name = ?`, [network_name]);
+
+    if (networkResult.length === 0) {
+        throw new Error('No network or smart contracts found for this network');
+    }
+
+    // Extract the evm_chain_id and rpc_url from the first result
+    const { evm_chain_id, rpc_url } = networkResult[0];
+
+    // Build contract address mappings
+    const contracts = {};
+    networkResult.forEach(contract => {
+        contracts[contract.smart_contract_name] = contract.smart_contract_address;
+    });
+
+    // Combine the network configuration
+    const networkConfig = {
+        network_name: network_name,
+        evm_chain_id: evm_chain_id,
+        rpc_url: rpc_url,
+        contracts: contracts
+    };
+
+    return networkConfig;
 }
 
 
 exports.launchInferenceAndGetRequestId = async (req, res) => {
     try {
-        const { model_id, user_input, system_prompt, temperature, max_tokens } = req.body;
+        const { model_id, user_input, system_prompt, temperature, max_tokens, network_name } = req.body;
 
-        // Combine system_prompt and user_input into input_data
-        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id != 6 && model_id !=9 ) {
-            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
-            console.log("model id is not 6, using combined system prompt and user input");
-        } else if (model_id == 9) {
-            input_data = user_input;
-        } else {
-            console.log("model id is 6, using user_input directly");
+        if (!network_name) {
+            return res.status(400).json({ error: 'Network name is required' });
         }
-        
-    
+
+        // Fetch network and contract configurations from the database using network_name
+        const networkConfig = await getNetworkConfig(network_name);
+
+        // Initialize provider with the fetched RPC URL
+        const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
 
         // Fetch user's private key, public key, and address from the database using appKey
         const appKey = req.headers['authorization']?.split(' ')[1];
-        const [user] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
-        if (user.length === 0) {
+        const [userResult] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
+
+        if (userResult.length === 0) {
             return res.status(401).json({ error: 'Invalid app key' });
         }
 
-        const userPrivateKey = user[0].private_key;
-        let userPublicKey = user[0].public_key;
-        const userAddress = user[0].address;
+        // Fetch user data
+        const user = userResult[0];
+
+        const userPrivateKey = user.private_key;
+        let userPublicKey = user.public_key;
+        const userAddress = user.address;
 
         // Remove '0x' prefix if present in the user's public key
         if (userPublicKey.startsWith('0x')) {
@@ -55,11 +89,30 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         }
 
         // Initialize the user's wallet
-        const userWallet = new ethers.Wallet(userPrivateKey, ethers.getDefaultProvider(config.RPC_URL));
-        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, userWallet);
-        const nodeContract = new ethers.Contract(config.CONTRACT_ADDRESSES.NODE_REGISTRY, abis.NodeRegistry, userWallet);
-        const modelContract = new ethers.Contract(config.CONTRACT_ADDRESSES.MODEL, abis.Model, userWallet);
+        const userWallet = new ethers.Wallet(userPrivateKey, provider);
 
+        // Initialize contracts with the contract addresses from the fetched configuration
+        const inferenceContractAddress = networkConfig.contracts.INFERENCE;
+        const nodeContractAddress = networkConfig.contracts.INFERENCE_NODE;
+        const modelContractAddress = networkConfig.contracts.MODEL;
+
+        const inferenceContract = new ethers.Contract(inferenceContractAddress, abis.Inference, userWallet);
+        const nodeContract = new ethers.Contract(nodeContractAddress, abis.NodeRegistry, userWallet);
+        const modelContract = new ethers.Contract(modelContractAddress, abis.Model, userWallet);
+
+        // Define input_data
+        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
+        if (model_id == 9) {
+            input_data = user_input;
+        } else if (model_id == 4) {
+            console.log("model id is 6, using user_input directly");
+        }else if (model_id == 6 ){
+            console.log("model id is 6, using user_input directly");
+        } else {
+            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
+            console.log("model id is not 6 or 9, using combined system prompt and user input");
+        }
+        console.log("model id : "+model_id);
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
@@ -71,7 +124,7 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-
+        console.log("nodeId : "+ nodeId);
         // Encrypt the input data with the node's and user's public key
         const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
         const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
@@ -97,11 +150,11 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         // Declare tx variable outside the mutex block
         let tx;
         // Handle user-specific nonce and transaction
-        const userState = getUserState(userAddress);
+        const userState = getUserState(userAddress,network_name);
         await userState.mutex.runExclusive(async () => {
             // If nonce is not cached, fetch it from the provider
             if (userState.nonce === null) {
-                userState.nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
+                userState.nonce = await provider.getTransactionCount(userAddress, 'pending');
             }
 
             // Blockchain transaction to register inference with local nonce
@@ -121,21 +174,20 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
             // Increment local nonce for the next transaction
             userState.nonce++;
-            
         });
 
         // Wait for the transaction to be mined
         await tx.wait();
 
         // Fetch the transaction receipt to get the requestId
-        const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(tx.hash);
+        const receipt = await provider.getTransactionReceipt(tx.hash);
 
         if (!receipt) {
             return res.status(404).json({ error: 'Transaction receipt not found' });
         }
 
         // Decoding the event logs to get the requestId
-        const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContract.target.toLowerCase());
+        const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContractAddress.toLowerCase());
         if (!log) {
             return res.status(404).json({ error: 'No logs found related to the Inference contract' });
         }
@@ -145,15 +197,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         // Return the requestId to the user
         res.status(200).json({ requestId: requestId });
     } catch (error) {
-         // Check if the error is due to insufficient balance
-         if (error.message.includes('estimateGas') || error.message.includes('CALL_EXCEPTION')) {
-            console.error('Error:', error);
-            return res.status(400).json({
-                error: 'Failed to launch inference',
-                details: 'The transaction likely failed due to insufficient balance. Please check your wallet balance and try again.'
-            });
-        }
-        
         console.error('Error launching inference and fetching requestId:', error.message || error);
         res.status(500).json({ error: 'Failed to launch inference', details: error.message });
     }
@@ -161,31 +204,35 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
 exports.launchInferenceAndGetTx = async (req, res) => {
     try {
-        const { model_id, user_input, system_prompt, temperature, max_tokens } = req.body;
+        const { model_id, user_input, system_prompt, temperature, max_tokens, network_name } = req.body;
 
-        // Combine system_prompt and user_input into input_data
-        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id != 6 && model_id !=9 ) {
-            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
-            console.log("model id is not 6, using combined system prompt and user input");
-        } else if (model_id == 9) {
-            input_data = user_input;
-        } else {
-            console.log("model id is 6, using user_input directly");
+        if (!network_name) {
+            return res.status(400).json({ error: 'Network name is required' });
         }
-        
-    
+
+        // Fetch network and contract configurations from the database using network_name
+        const networkConfig = await getNetworkConfig(network_name);
+
+        // Debugging log to verify contracts and provider setup
+        console.log('Network Configuration:', networkConfig);
+
+        // Initialize provider with the fetched RPC URL
+        const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
 
         // Fetch user's private key, public key, and address from the database using appKey
         const appKey = req.headers['authorization']?.split(' ')[1];
-        const [user] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
-        if (user.length === 0) {
+        const [userResult] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
+
+        if (userResult.length === 0) {
             return res.status(401).json({ error: 'Invalid app key' });
         }
 
-        const userPrivateKey = user[0].private_key;
-        let userPublicKey = user[0].public_key;
-        const userAddress = user[0].address;
+        // Fetch user data
+        const user = userResult[0];
+
+        const userPrivateKey = user.private_key;
+        let userPublicKey = user.public_key;
+        const userAddress = user.address;
 
         // Remove '0x' prefix if present in the user's public key
         if (userPublicKey.startsWith('0x')) {
@@ -193,11 +240,28 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         }
 
         // Initialize the user's wallet
-        const userWallet = new ethers.Wallet(userPrivateKey, ethers.getDefaultProvider(config.RPC_URL));
-        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, userWallet);
-        const nodeContract = new ethers.Contract(config.CONTRACT_ADDRESSES.NODE_REGISTRY, abis.NodeRegistry, userWallet);
-        const modelContract = new ethers.Contract(config.CONTRACT_ADDRESSES.MODEL, abis.Model, userWallet);
+        const userWallet = new ethers.Wallet(userPrivateKey, provider);
 
+        // Initialize contracts with the contract addresses from the fetched configuration
+        const inferenceContractAddress = networkConfig.contracts.INFERENCE;
+        const nodeContractAddress = networkConfig.contracts.INFERENCE_NODE;
+        const modelContractAddress = networkConfig.contracts.MODEL;
+
+        const inferenceContract = new ethers.Contract(inferenceContractAddress, abis.Inference, userWallet);
+        const nodeContract = new ethers.Contract(nodeContractAddress, abis.NodeRegistry, userWallet);
+        const modelContract = new ethers.Contract(modelContractAddress, abis.Model, userWallet);
+
+        // Define input_data
+        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
+        if (model_id != 6 && model_id != 9) {
+            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
+            console.log("model id is not 6 or 9, using combined system prompt and user input");
+        } else if (model_id == 9) {
+            input_data = user_input;
+        } else {
+            console.log("model id is 6, using user_input directly");
+        }
+        console.log("model id : "+model_id);
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
@@ -209,7 +273,7 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-
+        
         // Encrypt the input data with the node's and user's public key
         const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
         const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
@@ -235,11 +299,11 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         // Declare tx variable outside the mutex block
         let tx;
         // Handle user-specific nonce and transaction
-        const userState = getUserState(userAddress);
+        const userState = getUserState(userAddress,network_name);
         await userState.mutex.runExclusive(async () => {
             // If nonce is not cached, fetch it from the provider
             if (userState.nonce === null) {
-                userState.nonce = await ethers.getDefaultProvider(config.RPC_URL).getTransactionCount(userAddress, 'pending');
+                userState.nonce = await provider.getTransactionCount(userAddress, 'pending');
             }
 
             // Blockchain transaction to register inference with local nonce
@@ -259,43 +323,43 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
             // Increment local nonce for the next transaction
             userState.nonce++;
-            
         });
-
-        // Return the requestId to the user
+        // return the txHash to user
         res.status(200).json({ txHash: tx.hash });
     } catch (error) {
-         // Check if the error is due to insufficient balance
-         if (error.message.includes('estimateGas') || error.message.includes('CALL_EXCEPTION')) {
-            console.error('Error:', error);
-            return res.status(400).json({
-                error: 'Failed to launch inference',
-                details: 'The transaction likely failed due to insufficient balance. Please check your wallet balance and try again.'
-            });
-        }
-        
         console.error('Error launching inference and fetching requestId:', error.message || error);
         res.status(500).json({ error: 'Failed to launch inference', details: error.message });
     }
 };
 
+
 exports.getRequestIdFromTxHash = async (req, res) => {
     try {
-        const { txHash } = req.body;
+        const { txHash, network_name } = req.body;
 
         if (!txHash) {
             return res.status(400).json({ error: 'Transaction hash is required' });
         }
 
+        if (!network_name) {
+            return res.status(400).json({ error: 'Network name is required' });
+        }
+
+        // Fetch network and contract configurations from the database using network_name
+        const networkConfig = await getNetworkConfig(network_name);
+
+        // Initialize provider with the fetched RPC URL
+        const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
+
         // Fetch the transaction receipt using the transaction hash
-        const receipt = await ethers.getDefaultProvider(config.RPC_URL).getTransactionReceipt(txHash);
+        const receipt = await provider.getTransactionReceipt(txHash);
 
         if (!receipt) {
             return res.status(404).json({ error: 'Transaction receipt not found' });
         }
 
         // Initialize the InferenceContract instance
-        const inferenceContract = new ethers.Contract(config.CONTRACT_ADDRESSES.INFERENCE, abis.Inference, ethers.getDefaultProvider(config.RPC_URL));
+        const inferenceContract = new ethers.Contract(networkConfig.contracts.INFERENCE, abis.Inference, provider);
 
         // Find the log that matches the InferenceContract address
         const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContract.target.toLowerCase());
@@ -363,6 +427,7 @@ exports.fetchInferenceOutput = async (req, res) => {
 // Function to fetch the inference output using requestId
 async function getInferenceOutput(requestId) {
     try {
+        // Fetch network and contract configurations from the database using network_name
         const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?inference_id=${requestId}&order_asc=false&prev=false`;
         const response = await axios.get(url);
         
@@ -405,8 +470,6 @@ async function decryptInferenceResult(encryptedOutput, privateKey) {
         throw new Error(`Decryption failed: ${error.message}`);
     }
 }
-
-
 
 // Helper function to get a random node based on dataNodeId
 function getRandomObjectByDatanodeId(intArray, objectArray) {
