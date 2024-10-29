@@ -58,12 +58,14 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
     try {
         const { model_id, user_input, system_prompt, temperature, max_tokens, network_name } = req.body;
 
+        let network = network_name;
         if (!network_name) {
-            return res.status(400).json({ error: 'Network name is required' });
+            network = "aizel";
+        //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch network and contract configurations from the database using network_name
-        const networkConfig = await getNetworkConfig(network_name);
+        const networkConfig = await getNetworkConfig(network);
 
         // Initialize provider with the fetched RPC URL
         const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
@@ -104,7 +106,7 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
         if (model_id == 9) {
             input_data = user_input;
-        }  else if (model_id == 4 && network_name=="krest" || model_id == 2 && network_name == "peaq") {
+        }  else if (model_id == 4 && network == "krest" || model_id == 2 && network == "peaq") {
             console.log("using user_input directly");
         } else if (model_id == 6 ){
             console.log("model id is 6, using user_input directly");
@@ -123,7 +125,6 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-        console.log("nodeId : "+ nodeId);
         // Encrypt the input data with the node's and user's public key
         const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
         const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
@@ -163,10 +164,10 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
                 inputHash,
                 userPublicKey,
                 "0x0000000000000000000000000000000000000000",
-                ethers.parseEther('0.0000001'),
+                ethers.parseEther('0.00002'),
                 {
                     from: userAddress,
-                    value: ethers.parseEther('0.0000001'),
+                    value: ethers.parseEther('0.00002'),
                     nonce: userState.nonce // Use local nonce
                 }
             );
@@ -205,15 +206,14 @@ exports.launchInferenceAndGetTx = async (req, res) => {
     try {
         const { model_id, user_input, system_prompt, temperature, max_tokens, network_name } = req.body;
 
+        let network = network_name;
         if (!network_name) {
-            return res.status(400).json({ error: 'Network name is required' });
+            network = "aizel";
+        //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch network and contract configurations from the database using network_name
-        const networkConfig = await getNetworkConfig(network_name);
-
-        // Debugging log to verify contracts and provider setup
-        console.log('Network Configuration:', networkConfig);
+        const networkConfig = await getNetworkConfig(network);
 
         // Initialize provider with the fetched RPC URL
         const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
@@ -254,7 +254,7 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
         if (model_id == 9) {
             input_data = user_input;
-        } else if (model_id == 4 && network_name=="krest" || model_id == 2 && network_name == "peaq") {
+        } else if (model_id == 4 && network == "krest" || model_id == 2 && network == "peaq") {
             console.log("using user_input directly");
         } else if (model_id == 6 ){
             console.log("model id is 6, using user_input directly");
@@ -313,10 +313,10 @@ exports.launchInferenceAndGetTx = async (req, res) => {
                 inputHash,
                 userPublicKey,
                 "0x0000000000000000000000000000000000000000",
-                ethers.parseEther('0.0000001'),
+                ethers.parseEther('0.00002'),
                 {
                     from: userAddress,
-                    value: ethers.parseEther('0.0000001'),
+                    value: ethers.parseEther('0.00002'),
                     nonce: userState.nonce // Use local nonce
                 }
             );
@@ -341,12 +341,14 @@ exports.getRequestIdFromTxHash = async (req, res) => {
             return res.status(400).json({ error: 'Transaction hash is required' });
         }
 
+        let network = network_name;
         if (!network_name) {
-            return res.status(400).json({ error: 'Network name is required' });
+            network = "aizel";
+        //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch network and contract configurations from the database using network_name
-        const networkConfig = await getNetworkConfig(network_name);
+        const networkConfig = await getNetworkConfig(network);
 
         // Initialize provider with the fetched RPC URL
         const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
@@ -388,8 +390,10 @@ exports.fetchInferenceOutput = async (req, res) => {
             return res.status(400).json({ error: 'requestId is required' });
         }
 
+        let network = network_name;
         if (!network_name) {
-            return res.status(400).json({ error: 'Network name is required' });
+            network = "aizel";
+        //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch user's private key from the database using appKey
@@ -401,18 +405,18 @@ exports.fetchInferenceOutput = async (req, res) => {
         const userPrivateKey = user[0].private_key;
         
         // Fetch the inference output based on requestId
-        const inferenceResult = await getInferenceOutput(requestId,network_name);
+        const inferenceResult = await getInferenceOutput(requestId,network);
 
         if (!inferenceResult) {
             return res.status(404).json({ error: 'No valid inference result found' });
         }
 
         // Check the status of the inference request
-        if (inferenceResult.status !== 'Success') {
+        if (inferenceResult.status !== 'Success' && inferenceResult.status !== 'Submit') {
             // If not successful, return the current status
             return res.status(200).json({ status: inferenceResult.status });
         }
-
+        console.log(inferenceResult);
         // If status is 'Success', decrypt the output
         if (!inferenceResult.output) {
             return res.status(404).json({ error: 'No output available for decryption' });
@@ -421,7 +425,10 @@ exports.fetchInferenceOutput = async (req, res) => {
         const decryptedOutput = await decryptInferenceResult(inferenceResult.output, userPrivateKey);
 
         // Return the decrypted output
-        res.status(200).json({ decryptedOutput: decryptedOutput });
+        res.status(200).json({ 
+            inferenceStatus: inferenceResult.status,
+            decryptedOutput: decryptedOutput 
+        });
     } catch (error) {
         console.error('Error fetching inference output:', error.message || error);
         res.status(500).json({ error: 'Failed to fetch inference output', details: error.message });

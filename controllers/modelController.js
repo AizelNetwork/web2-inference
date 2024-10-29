@@ -50,12 +50,14 @@ exports.fetchModels = async (req, res) => {
             return res.status(401).json({ error: 'Invalid app key' });
         }
 
+        let network = network_name;
         if (!network_name) {
-            return res.status(400).json({ error: 'Network name is required' });
+            network = "aizel";
+        //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch network and contract configurations from the database using network_name
-        const networkConfig = await getNetworkConfig(network_name);
+        const networkConfig = await getNetworkConfig(network);
         // Fetch the models from the external API
         const url = config.API_ENDPOINTS.MODEL_LIST+"?network="+networkConfig.network_name;
         const response = await axios.get(url,{}
