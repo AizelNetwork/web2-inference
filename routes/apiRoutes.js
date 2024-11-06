@@ -2,7 +2,7 @@ const express = require('express');
 const authController = require('../controllers/authController');
 const modelController = require('../controllers/modelController');
 const inferenceController = require('../controllers/inferenceController');
-const networkController = require('../controllers/networkController');
+const userInfoController = require('../controllers/userInfoController');
 const authenticate = require('../utils/authMiddleware');
 
 const router = express.Router();
@@ -10,8 +10,8 @@ const router = express.Router();
 // API route to generate app key
 router.post('/v1/generate-app-key', authController.generateAppKey);
 
-// Route to fetch all networks and contracts
-router.get('/v1/networks', networkController.getAllNetworksAndContracts);
+// Route to set user information
+router.post('/v1/userinfo/set', userInfoController.createUserInfo);
 
 // API to fetch models
 router.get('/v1/models', authenticate, modelController.fetchModels);
