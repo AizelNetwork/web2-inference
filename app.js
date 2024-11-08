@@ -4,7 +4,10 @@ const express = require('express');
 const apiRoutes = require('./routes/apiRoutes');
 
 const app = express();
-app.use(express.json());
+
+// Increase the payload limit using express.json and express.urlencoded
+app.use(express.json({ limit: '10mb' }));  // Set a larger limit here
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));  // Same limit for URL-encoded data
 
 app.use('/api', apiRoutes);
 

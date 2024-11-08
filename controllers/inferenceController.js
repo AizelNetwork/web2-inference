@@ -110,9 +110,11 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
             console.log("using user_input directly");
         } else if (model_id == 6 ){
             console.log("model id is 6, using user_input directly");
-        } else {
+        } else if (model_id == 1){
             input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
             console.log("model id is not 6 or 9, using combined system prompt and user input");
+        } else {
+            console.log("using user_input directly");
         }
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
