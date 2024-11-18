@@ -56,91 +56,148 @@ async function getNetworkConfig(network_name) {
 
 exports.launchInferenceAndGetRequestId = async (req, res) => {
     try {
-        const { model_id, user_input, system_prompt, temperature, max_tokens, network_name } = req.body;
+        // Extract parameters from the request body
+        const { model_id, user_input, network_name, type } = req.body;
+        const network = network_name || 'aizel';
 
-        let network = network_name;
-        if (!network_name) {
-            network = "aizel";
-        //    return res.status(400).json({ error: 'Network name is required' });
-        }
-
-        // Fetch network and contract configurations from the database using network_name
+        // Fetch network configuration
         const networkConfig = await getNetworkConfig(network);
-
-        // Initialize provider with the fetched RPC URL
         const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
 
-        // Fetch user's private key, public key, and address from the database using appKey
+        // Get appKey from headers and fetch user data from the database
         const appKey = req.headers['authorization']?.split(' ')[1];
-        const [userResult] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
+        const [userResult] = await db.query(
+            'SELECT private_key, address, public_key FROM users WHERE app_key = ?',
+            [appKey]
+        );
 
         if (userResult.length === 0) {
             return res.status(401).json({ error: 'Invalid app key' });
         }
 
-        // Fetch user data
-        const user = userResult[0];
+        const { private_key: userPrivateKey, address: userAddress, public_key: userPublicKey } = userResult[0];
 
-        const userPrivateKey = user.private_key;
-        let userPublicKey = user.public_key;
-        const userAddress = user.address;
-
-        // Remove '0x' prefix if present in the user's public key
-        if (userPublicKey.startsWith('0x')) {
-            userPublicKey = userPublicKey.slice(2);
-        }
-
-        // Initialize the user's wallet
+        // Initialize user's wallet
         const userWallet = new ethers.Wallet(userPrivateKey, provider);
 
-        // Initialize contracts with the contract addresses from the fetched configuration
-        const inferenceContractAddress = networkConfig.contracts.INFERENCE;
-        const nodeContractAddress = networkConfig.contracts.INFERENCE_NODE;
-        const modelContractAddress = networkConfig.contracts.MODEL;
+        // Initialize contracts with contract addresses from the configuration
+        const inferenceContract = new ethers.Contract(
+            networkConfig.contracts.INFERENCE,
+            abis.Inference,
+            userWallet
+        );
+        const nodeContract = new ethers.Contract(
+            networkConfig.contracts.INFERENCE_NODE,
+            abis.NodeRegistry,
+            userWallet
+        );
+        const modelContract = new ethers.Contract(
+            networkConfig.contracts.MODEL,
+            abis.Models, // Update ABI reference to 'Models' contract
+            userWallet
+        );
+        const feeManagerContract = new ethers.Contract(
+            networkConfig.contracts.FEE_MANAGER,
+            abis.FeeManager, // Ensure this ABI is imported correctly
+            userWallet
+        );
 
-        const inferenceContract = new ethers.Contract(inferenceContractAddress, abis.Inference, userWallet);
-        const nodeContract = new ethers.Contract(nodeContractAddress, abis.NodeRegistry, userWallet);
-        const modelContract = new ethers.Contract(modelContractAddress, abis.Model, userWallet);
+        // Fetch model details to get modelName and modelType
+        const modelDetails = await modelContract.getModelDetails(model_id);
+        const modelName = modelDetails.modelName;
+        const modelTypeBigInt = modelDetails.modelType;// Fetch modelType from contract
 
-        // Define input_data
-        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id == 9) {
-            input_data = user_input;
-        }  else if (model_id == 4 && network == "krest" || model_id == 2 && network == "peaq") {
-            console.log("using user_input directly");
-        } else if (model_id == 6 ){
-            console.log("model id is 6, using user_input directly");
-        } else if (model_id == 1){
-            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
-            console.log("model id is not 6 or 9, using combined system prompt and user input");
+        // Convert modelType from BigInt to Number
+        const modelType = Number(modelTypeBigInt);
+
+        // Determine how to handle user_input based on modelId
+        let inputContent;
+
+        if (Number(model_id) === 1) {
+            // For modelId == 1, use user_input as string
+            inputContent = typeof user_input === 'string' ? user_input : JSON.stringify(user_input);
         } else {
-            console.log("using user_input directly");
+            // For other modelIds, parse user_input as JSON object
+            if (typeof user_input === 'string') {
+                try {
+                    inputContent = JSON.parse(user_input);
+                } catch (error) {
+                    throw new Error('Invalid user_input JSON string');
+                }
+            } else {
+                inputContent = user_input;
+            }
         }
+
+        // Prepare the content
+        const content = JSON.stringify({ modelName: modelName, requestData: inputContent });
+
+        // Prepare the request object
+        let request = {
+            type: type,
+            modelType: modelType
+        };
+
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
-
         const node = getRandomObjectByDatanodeId(dataNodes, nodesData);
+
         if (!node) {
             throw new Error('No matching node found for the selected data nodes.');
         }
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-        // Encrypt the input data with the node's and user's public key
-        const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
-        const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
 
-        // Send inference request to the API with encrypted data
-        const apiResponse = await axios.post(config.API_ENDPOINTS.INFERENCE_LAUNCH, {
-            requester: userAddress,
-            node_id: Number(nodeId),
-            model_id: Number(model_id),
-            input_encrypt_by_node: encryptedByNode,
-            input_encrypt_by_user: encryptedByUser,
-            pubkey: userPublicKey,
-            session: "cli-session"
-        });
+        if (type === 'Plaintext') {
+            // No encryption needed
+            request['content'] = content;
+            request['userContent'] = content;
+        } else if (type === 'Encrypted') {
+            // Fetch the user's public key from the database
+            let userPk = userPublicKey;
+            if (!userPk) {
+                return res.status(400).json({ error: 'Public key is required for encrypted inference.' });
+            }
+
+            // Remove '0x' prefix if present
+            if (userPk.startsWith('0x')) {
+                userPk = userPk.slice(2);
+            }
+
+            // Encrypt the content using node's and user's public keys
+            const encryptedByNode = elgamal.encrypt(
+                Buffer.from(content),
+                Buffer.from(nodePublicKey, 'hex')
+            );
+            const encryptedByUser = elgamal.encrypt(
+                Buffer.from(content),
+                Buffer.from(userPk, 'hex')
+            );
+
+            request['publicKey'] = userPk;
+            request['content'] = encryptedByNode;
+            request['userContent'] = encryptedByUser;
+        } else {
+            return res.status(400).json({ error: 'Unsupported type. Allowed types are PlainText and Encrypted.' });
+        }
+        // Use config.API_ENDPOINTS.INFERENCE_LAUNCH instead of hardcoded URL
+        const apiResponse = await axios.post(
+            config.API_ENDPOINTS.INFERENCE_LAUNCH,
+            {
+                requester: userAddress,
+                node_id: Number(nodeId),
+                model_id: Number(model_id),
+                input: JSON.stringify(request),
+                session: 'cli-session',
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
 
         if (apiResponse.status !== 200) {
             console.error('API Response Error:', apiResponse.data);
@@ -149,32 +206,59 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         const inputHash = apiResponse.data;
 
-        // Declare tx variable outside the mutex block
+        // Prepare for blockchain transaction
+        // Define the coin address (e.g., address(0) for native currency)
+        const feeCoinAddress = ethers.ZeroAddress; // '0x0000000000000000000000000000000000000000'
+
+        // Fetch the fee amount from the FeeManager contract
+        let minFeeAmount = await feeManagerContract.getFeeCoin(feeCoinAddress);
+        // minFeeAmount is a BigInt
+
+        // **Adjust the fee amount when model_id == 7**
+        if (Number(model_id) === 7) {
+            let contentSize = 1n; // Default content size
+            let userInputObj;
+
+            // Parse user_input to get the contents array length
+            if (typeof user_input === 'string') {
+                try {
+                    userInputObj = JSON.parse(user_input);
+                } catch (error) {
+                    throw new Error('Invalid user_input JSON string');
+                }
+            } else {
+                userInputObj = user_input;
+            }
+
+            if (userInputObj && Array.isArray(userInputObj.contents)) {
+                contentSize = BigInt(userInputObj.contents.length);
+            } else {
+                throw new Error('Invalid input: contents should be an array');
+            }
+
+            // Multiply minFeeAmount by contentSize
+            minFeeAmount = minFeeAmount * contentSize;
+        }
         let tx;
-        // Handle user-specific nonce and transaction
-        const userState = getUserState(userAddress,network_name);
+        const userState = getUserState(userAddress, network);
         await userState.mutex.runExclusive(async () => {
-            // If nonce is not cached, fetch it from the provider
             if (userState.nonce === null) {
                 userState.nonce = await provider.getTransactionCount(userAddress, 'pending');
             }
 
-            // Blockchain transaction to register inference with local nonce
             tx = await inferenceContract.requestInference(
                 Number(nodeId),
                 model_id,
                 inputHash,
-                userPublicKey,
-                "0x0000000000000000000000000000000000000000",
-                ethers.parseEther('0.00002'),
+                '0x0000000000000000000000000000000000000000',
+                minFeeAmount,
                 {
                     from: userAddress,
-                    value: ethers.parseEther('0.00002'),
-                    nonce: userState.nonce // Use local nonce
+                    value: minFeeAmount,
+                    nonce: userState.nonce,
                 }
             );
 
-            // Increment local nonce for the next transaction
             userState.nonce++;
         });
 
@@ -188,8 +272,11 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
             return res.status(404).json({ error: 'Transaction receipt not found' });
         }
 
-        // Decoding the event logs to get the requestId
-        const log = receipt.logs.find(log => log.address.toLowerCase() === inferenceContractAddress.toLowerCase());
+        // Decode the event logs to get the requestId
+        const log = receipt.logs.find(
+            (log) => log.address.toLowerCase() === inferenceContract.target.toLowerCase()
+        );
+
         if (!log) {
             return res.status(404).json({ error: 'No logs found related to the Inference contract' });
         }
@@ -204,92 +291,151 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
     }
 };
 
+
 exports.launchInferenceAndGetTx = async (req, res) => {
     try {
-        const { model_id, user_input, system_prompt, temperature, max_tokens, network_name } = req.body;
+        // Extract parameters from the request body
+        const { model_id, user_input, network_name, type } = req.body;
+        const network = network_name || 'aizel';
 
-        let network = network_name;
-        if (!network_name) {
-            network = "aizel";
-        //    return res.status(400).json({ error: 'Network name is required' });
-        }
-
-        // Fetch network and contract configurations from the database using network_name
+        // Fetch network configuration
         const networkConfig = await getNetworkConfig(network);
-
-        // Initialize provider with the fetched RPC URL
         const provider = new ethers.getDefaultProvider(networkConfig.rpc_url);
 
-        // Fetch user's private key, public key, and address from the database using appKey
+        // Get appKey from headers and fetch user data from the database
         const appKey = req.headers['authorization']?.split(' ')[1];
-        const [userResult] = await db.query('SELECT private_key, public_key, address FROM users WHERE app_key = ?', [appKey]);
+        const [userResult] = await db.query(
+            'SELECT private_key, address, public_key FROM users WHERE app_key = ?',
+            [appKey]
+        );
 
         if (userResult.length === 0) {
             return res.status(401).json({ error: 'Invalid app key' });
         }
 
-        // Fetch user data
-        const user = userResult[0];
+        const { private_key: userPrivateKey, address: userAddress, public_key: userPublicKey } = userResult[0];
 
-        const userPrivateKey = user.private_key;
-        let userPublicKey = user.public_key;
-        const userAddress = user.address;
-
-        // Remove '0x' prefix if present in the user's public key
-        if (userPublicKey.startsWith('0x')) {
-            userPublicKey = userPublicKey.slice(2);
-        }
-
-        // Initialize the user's wallet
+        // Initialize user's wallet
         const userWallet = new ethers.Wallet(userPrivateKey, provider);
 
-        // Initialize contracts with the contract addresses from the fetched configuration
-        const inferenceContractAddress = networkConfig.contracts.INFERENCE;
-        const nodeContractAddress = networkConfig.contracts.INFERENCE_NODE;
-        const modelContractAddress = networkConfig.contracts.MODEL;
+        // Initialize contracts with contract addresses from the configuration
+        const inferenceContract = new ethers.Contract(
+            networkConfig.contracts.INFERENCE,
+            abis.Inference,
+            userWallet
+        );
+        const nodeContract = new ethers.Contract(
+            networkConfig.contracts.INFERENCE_NODE,
+            abis.NodeRegistry,
+            userWallet
+        );
+        const modelContract = new ethers.Contract(
+            networkConfig.contracts.MODEL,
+            abis.Models, // Update ABI reference to 'Models' contract
+            userWallet
+        );
+        const feeManagerContract = new ethers.Contract(
+            networkConfig.contracts.FEE_MANAGER,
+            abis.FeeManager, // Ensure this ABI is imported correctly
+            userWallet
+        );
 
-        const inferenceContract = new ethers.Contract(inferenceContractAddress, abis.Inference, userWallet);
-        const nodeContract = new ethers.Contract(nodeContractAddress, abis.NodeRegistry, userWallet);
-        const modelContract = new ethers.Contract(modelContractAddress, abis.Model, userWallet);
+        // Fetch model details to get modelName and modelType
+        const modelDetails = await modelContract.getModelDetails(model_id);
+        const modelName = modelDetails.modelName;
+        const modelTypeBigInt = modelDetails.modelType;// Fetch modelType from contract
 
-        // Define input_data
-        let input_data = JSON.stringify(user_input); // Ensuring user_input is in JSON string format
-        if (model_id == 9) {
-            input_data = user_input;
-        } else if (model_id == 4 && network == "krest" || model_id == 2 && network == "peaq") {
-            console.log("using user_input directly");
-        } else if (model_id == 6 ){
-            console.log("model id is 6, using user_input directly");
+        // Convert modelType from BigInt to Number
+        const modelType = Number(modelTypeBigInt);
+
+        // Determine how to handle user_input based on modelId
+        let inputContent;
+
+        if (Number(model_id) === 1) {
+            // For modelId == 1, use user_input as string
+            inputContent = typeof user_input === 'string' ? user_input : JSON.stringify(user_input);
         } else {
-            input_data = `### System:\n${system_prompt}\n### Human:\n${input_data}`;
-            console.log("model id is not 6 or 9, using combined system prompt and user input");
+            // For other modelIds, parse user_input as JSON object
+            if (typeof user_input === 'string') {
+                try {
+                    inputContent = JSON.parse(user_input);
+                } catch (error) {
+                    throw new Error('Invalid user_input JSON string');
+                }
+            } else {
+                inputContent = user_input;
+            }
         }
+
+        // Prepare the content
+        const content = JSON.stringify({ modelName: modelName, requestData: inputContent });
+
+        // Prepare the request object
+        let request = {
+            type: type,
+            modelType: modelType
+        };
+
         // Fetch data nodes for the model
         const dataNodes = await modelContract.getDataNodesForModel(model_id);
         const nodesData = await nodeContract.getAllActiveNodes();
-
         const node = getRandomObjectByDatanodeId(dataNodes, nodesData);
+
         if (!node) {
             throw new Error('No matching node found for the selected data nodes.');
         }
 
         const nodeId = node.nodeId;
         const nodePublicKey = node.pubkey;
-        
-        // Encrypt the input data with the node's and user's public key
-        const encryptedByNode = elgamal.encrypt(Buffer.from(input_data), Buffer.from(nodePublicKey, 'hex'));
-        const encryptedByUser = elgamal.encrypt(Buffer.from(input_data), Buffer.from(userPublicKey, 'hex'));
 
-        // Send inference request to the API with encrypted data
-        const apiResponse = await axios.post(config.API_ENDPOINTS.INFERENCE_LAUNCH, {
-            requester: userAddress,
-            node_id: Number(nodeId),
-            model_id: Number(model_id),
-            input_encrypt_by_node: encryptedByNode,
-            input_encrypt_by_user: encryptedByUser,
-            pubkey: userPublicKey,
-            session: "cli-session"
-        });
+        if (type === 'Plaintext') {
+            // No encryption needed
+            request['content'] = content;
+            request['userContent'] = content;
+        } else if (type === 'Encrypted') {
+            // Fetch the user's public key from the database
+            let userPk = userPublicKey;
+            if (!userPk) {
+                return res.status(400).json({ error: 'Public key is required for encrypted inference.' });
+            }
+
+            // Remove '0x' prefix if present
+            if (userPk.startsWith('0x')) {
+                userPk = userPk.slice(2);
+            }
+
+            // Encrypt the content using node's and user's public keys
+            const encryptedByNode = elgamal.encrypt(
+                Buffer.from(content),
+                Buffer.from(nodePublicKey, 'hex')
+            );
+            const encryptedByUser = elgamal.encrypt(
+                Buffer.from(content),
+                Buffer.from(userPk, 'hex')
+            );
+
+            request['publicKey'] = userPk;
+            request['content'] = encryptedByNode;
+            request['userContent'] = encryptedByUser;
+        } else {
+            return res.status(400).json({ error: 'Unsupported type. Allowed types are PlainText and Encrypted.' });
+        }
+        // Use config.API_ENDPOINTS.INFERENCE_LAUNCH instead of hardcoded URL
+        const apiResponse = await axios.post(
+            config.API_ENDPOINTS.INFERENCE_LAUNCH,
+            {
+                requester: userAddress,
+                node_id: Number(nodeId),
+                model_id: Number(model_id),
+                input: JSON.stringify(request),
+                session: 'cli-session',
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
 
         if (apiResponse.status !== 200) {
             console.error('API Response Error:', apiResponse.data);
@@ -298,32 +444,59 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
         const inputHash = apiResponse.data;
 
-        // Declare tx variable outside the mutex block
+        // Prepare for blockchain transaction
+        // Define the coin address (e.g., address(0) for native currency)
+        const feeCoinAddress = ethers.ZeroAddress; // '0x0000000000000000000000000000000000000000'
+
+        // Fetch the fee amount from the FeeManager contract
+        let minFeeAmount = await feeManagerContract.getFeeCoin(feeCoinAddress);
+        // minFeeAmount is a BigInt
+
+        // **Adjust the fee amount when model_id == 7**
+        if (Number(model_id) === 7) {
+            let contentSize = 1n; // Default content size
+            let userInputObj;
+
+            // Parse user_input to get the contents array length
+            if (typeof user_input === 'string') {
+                try {
+                    userInputObj = JSON.parse(user_input);
+                } catch (error) {
+                    throw new Error('Invalid user_input JSON string');
+                }
+            } else {
+                userInputObj = user_input;
+            }
+
+            if (userInputObj && Array.isArray(userInputObj.contents)) {
+                contentSize = BigInt(userInputObj.contents.length);
+            } else {
+                throw new Error('Invalid input: contents should be an array');
+            }
+
+            // Multiply minFeeAmount by contentSize
+            minFeeAmount = minFeeAmount * contentSize;
+        }
         let tx;
-        // Handle user-specific nonce and transaction
-        const userState = getUserState(userAddress,network_name);
+        const userState = getUserState(userAddress, network);
         await userState.mutex.runExclusive(async () => {
-            // If nonce is not cached, fetch it from the provider
             if (userState.nonce === null) {
                 userState.nonce = await provider.getTransactionCount(userAddress, 'pending');
             }
 
-            // Blockchain transaction to register inference with local nonce
             tx = await inferenceContract.requestInference(
                 Number(nodeId),
                 model_id,
                 inputHash,
-                userPublicKey,
-                "0x0000000000000000000000000000000000000000",
-                ethers.parseEther('0.00002'),
+                '0x0000000000000000000000000000000000000000',
+                minFeeAmount,
                 {
                     from: userAddress,
-                    value: ethers.parseEther('0.00002'),
-                    nonce: userState.nonce // Use local nonce
+                    value: minFeeAmount,
+                    nonce: userState.nonce,
                 }
             );
 
-            // Increment local nonce for the next transaction
             userState.nonce++;
         });
         // return the txHash to user
@@ -346,7 +519,7 @@ exports.getRequestIdFromTxHash = async (req, res) => {
         let network = network_name;
         if (!network_name) {
             network = "aizel";
-        //    return res.status(400).json({ error: 'Network name is required' });
+            //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch network and contract configurations from the database using network_name
@@ -395,7 +568,7 @@ exports.fetchInferenceOutput = async (req, res) => {
         let network = network_name;
         if (!network_name) {
             network = "aizel";
-        //    return res.status(400).json({ error: 'Network name is required' });
+            //    return res.status(400).json({ error: 'Network name is required' });
         }
 
         // Fetch user's private key from the database using appKey
@@ -405,9 +578,9 @@ exports.fetchInferenceOutput = async (req, res) => {
         }
 
         const userPrivateKey = user[0].private_key;
-        
+
         // Fetch the inference output based on requestId
-        const inferenceResult = await getInferenceOutput(requestId,network);
+        const inferenceResult = await getInferenceOutput(requestId, network);
 
         if (!inferenceResult) {
             return res.status(404).json({ error: 'No valid inference result found' });
@@ -418,19 +591,39 @@ exports.fetchInferenceOutput = async (req, res) => {
             // If not successful, return the current status
             return res.status(200).json({ status: inferenceResult.status });
         }
-        console.log(inferenceResult);
         // If status is 'Success', decrypt the output
         if (!inferenceResult.output) {
             return res.status(404).json({ error: 'No output available for decryption' });
         }
+        // Determine the type from inferenceResult.input
+        let inputData;
+        try {
+            inputData = JSON.parse(inferenceResult.input);
+        } catch (error) {
+            return res.status(500).json({ error: 'Failed to parse inference input', details: error.message });
+        }
 
-        const decryptedOutput = await decryptInferenceResult(inferenceResult.output, userPrivateKey);
+        const type = inputData.type;
 
-        // Return the decrypted output
-        res.status(200).json({ 
-            inferenceStatus: inferenceResult.status,
-            decryptedOutput: decryptedOutput 
-        });
+        // If type is 'Plaintext', return the output directly
+        if (type === 'Plaintext') {
+            // Return the output directly
+            res.status(200).json({
+                inferenceStatus: inferenceResult.status,
+                output: inferenceResult.output
+            });
+        } else if (type === 'Encrypted') {
+            // Decrypt the output
+            const decryptedOutput = await decryptInferenceResult(inferenceResult.output, userPrivateKey);
+
+            // Return the decrypted output
+            res.status(200).json({
+                inferenceStatus: inferenceResult.status,
+                output: decryptedOutput
+            });
+        } else {
+            return res.status(400).json({ error: 'Unsupported type' });
+        }
     } catch (error) {
         console.error('Error fetching inference output:', error.message || error);
         res.status(500).json({ error: 'Failed to fetch inference output', details: error.message });
@@ -438,13 +631,13 @@ exports.fetchInferenceOutput = async (req, res) => {
 };
 
 // Function to fetch the inference output using requestId
-async function getInferenceOutput(requestId,network_name) {
+async function getInferenceOutput(requestId, network_name) {
     try {
-        
+
         // Fetch network and contract configurations from the database using network_name
         const url = `${config.API_ENDPOINTS.INFERENCE_LIST}?network=${network_name}&inference_id=${requestId}&order_asc=false&prev=false`;
         const response = await axios.get(url);
-        
+
         if (!response.data || !response.data.data || !response.data.data.records) {
             throw new Error("Invalid response structure from API.");
         }
