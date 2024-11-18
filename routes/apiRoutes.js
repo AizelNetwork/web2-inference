@@ -14,6 +14,9 @@ router.post('/v1/generate-app-key', authController.generateAppKey);
 // Route to set user information
 router.post('/v1/userinfo/set', userInfoController.createUserInfo);
 
+// API to fetch userinfo
+router.get('/v1/userinfo', authenticate, userInfoController.getUserInfo);
+
 // API to fetch models
 router.get('/v1/models', authenticate, modelController.fetchModels);
 
