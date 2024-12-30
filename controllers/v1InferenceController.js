@@ -60,8 +60,12 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
 
         let network = network_name;
         if (!network_name) {
-            network = "aizel";
+            network = "devnet";
         //    return res.status(400).json({ error: 'Network name is required' });
+        }
+
+        if (network == 'aizel') {
+            return res.status(400).json({ error: 'aizel network is not available yet. Please use devnet instead.' });
         }
 
         // Fetch network and contract configurations from the database using network_name
@@ -210,8 +214,12 @@ exports.launchInferenceAndGetTx = async (req, res) => {
 
         let network = network_name;
         if (!network_name) {
-            network = "aizel";
+            network = "devnet";
         //    return res.status(400).json({ error: 'Network name is required' });
+        }
+
+        if (network == 'aizel') {
+            return res.status(400).json({ error: 'aizel network is not available yet. Please use devnet instead.' });
         }
 
         // Fetch network and contract configurations from the database using network_name
