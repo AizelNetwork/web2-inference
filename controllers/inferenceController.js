@@ -300,7 +300,11 @@ exports.launchInferenceAndGetTx = async (req, res) => {
     try {
         // Extract parameters from the request body
         const { model_id, user_input, network_name, type } = req.body;
-        const network = network_name || 'aizel';
+        const network = network_name || 'devnet';
+
+        if (network == 'aizel') {
+            return res.status(400).json({ error: 'aizel network is not available yet. Please use devnet instead.' });
+        }
 
         // Fetch network configuration
         const networkConfig = await getNetworkConfig(network);
