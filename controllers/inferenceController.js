@@ -117,8 +117,8 @@ exports.launchInferenceAndGetRequestId = async (req, res) => {
         // Determine how to handle user_input based on modelId
         let inputContent;
 
-        if (Number(model_id) === 1) {
-            // For modelId == 1, use user_input as string
+        if (modelName == "llama-3.1-8b-instruct-q4_k_m.gguf") {
+            // For llm , use user_input as string
             inputContent = typeof user_input === 'string' ? user_input : JSON.stringify(user_input);
         } else {
             // For other modelIds, parse user_input as JSON object
@@ -355,8 +355,8 @@ exports.launchInferenceAndGetTx = async (req, res) => {
         // Determine how to handle user_input based on modelId
         let inputContent;
 
-        if (Number(model_id) === 1) {
-            // For modelId == 1, use user_input as string
+        if (modelName == "llama-3.1-8b-instruct-q4_k_m.gguf") {
+            // For llm, use user_input as string
             inputContent = typeof user_input === 'string' ? user_input : JSON.stringify(user_input);
         } else {
             // For other modelIds, parse user_input as JSON object
